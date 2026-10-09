@@ -1,19 +1,16 @@
 # DECISIONS.md
 
-1. **Indexes.** The unique `(emp_code, date)` index guarantees one attendance record per employee per day. The unique
-`(emp_code)` index guarantees employee identity. `(date, emp_code)` supports attendance date ordering and tie-breaking,
-while `(department)` supports employee filtering and department analytics. I considered an index on `(status)`, but
-rejected it because status has low cardinality and would provide little selectivity.
+1. **Indexes:**
+We created a unique compound index on `attendance_logs(emp_code, date)` to enforce one daily record per employee, and a unique index on `employees(emp_code)` to guarantee unique business IDs. We also indexed `attendance_logs(date, emp_code)` and `employees(department)` for fast pagination and aggregation lookups. An index on `status` alone was considered and rejected due to low cardinality.
 
-2. **Punch-in race.** Concurrent requests may both verify that the employee exists, but neither relies on that check to
-prevent duplicates. They both attempt the insert; MongoDB serializes the unique compound key. One succeeds, while the
-other receives `DuplicateKeyError` (`E11000`), which the endpoint converts to HTTP 409.
+2. **Punch-in race:**
+When two identical punch-in requests arrive simultaneously, both evaluate business rules, but MongoDB's atomic index engine serializes the writes. The first insert succeeds; the second violates the unique compound index `(emp_code, date)` and throws a `DuplicateKeyError` (E11000), which our handler catches to return a clean HTTP 409 Conflict.
 
-3. **Ties.** The leaderboard sorts by total late minutes descending, then `emp_code` ascending. This deterministic
-secondary key makes tied results stable, preventing test flakiness and pagination duplicates.
+3. **Ties:**
+When employees tie on late minutes at the limit threshold, our pipeline uses deterministic secondary sorting: `{"total_late_minutes": -1, "emp_code": 1}`. Sorting by `emp_code` ascending ensures consistent, deterministic results and prevents pagination drift.
 
-4. **Headcount.** The department aggregation starts with employees and `$lookup`s attendance logs. Employees with zero
-logs are preserved, so they still count in department headcount.
+4. **Headcount:**
+The department summary pipeline initiates from the `employees` collection and performs a `$lookup` into `attendance_logs`. Grouping by department after preserving unmatched employees ensures employees with zero logs are accurately counted in total headcount.
 
-5. **100x data.** I would shard `attendance_logs` on `(emp_code, date)` and pre-aggregate daily metrics using background
-workers or change streams.
+5. **One thing you would change for 100x data:**
+Shard `attendance_logs` on a hashed compound key `(emp_code, date)` and offload analytics queries to pre-computed daily rollups updated via MongoDB Change Streams rather than running on-demand aggregation pipelines over raw collections.
