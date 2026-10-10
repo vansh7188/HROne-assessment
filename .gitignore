@@ -1,8 +1,11 @@
-.env
-.env.*
-!.env.example
 .venv/
+env/
+.env
+.env.local
 __pycache__/
 *.pyc
+Dockerfile
+docker-compose.yml
+.dockerignore
 kit.zip
 candidate_kit/
