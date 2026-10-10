@@ -1,11 +1,11 @@
 # DECISIONS.md
 
-1. **Indexes:** We created a unique compound index on `attendance_logs(emp_code, date)` to enforce one daily record per employee, plus a unique `employees(emp_code)` index for business IDs. We also indexed `attendance_logs(date, emp_code)` for pagination and `employees(department)` for lookups and analytics. An index on `status` alone was considered and rejected because status has low cardinality.
+1. **Indexes:** `attendance_logs(emp_code, date)` is unique, enforcing one attendance record per employee per calendar date. `employees(emp_code)` is unique, enforcing stable business identifiers. The performance index `attendance_logs(date, emp_code)` supports date ordering and employee tie-breaking; `employees(department)` supports department filters and analytics. An index on `status` was considered but rejected because status has low cardinality and poor selectivity.
 
-2. **Punch-in race:** Concurrent requests may both evaluate business rules, but MongoDB serializes their inserts through the unique compound index. The first succeeds; the second raises `DuplicateKeyError` (E11000), which our handler catches and returns as HTTP 409 Conflict.
+2. **Punch-in race:** Concurrent requests may both validate the employee, but the unique compound index serializes conflicting inserts. One insert succeeds; the other raises `DuplicateKeyError` (`E11000`). The endpoint catches that database error and returns HTTP 409, making the uniqueness guarantee atomic rather than dependent on a check-then-insert sequence.
 
-3. **Ties:** The leaderboard uses deterministic sorting: `{"total_late_minutes": -1, "emp_code": 1}`. The ascending employee code tie-breaker ensures stable results and prevents pagination drift or test flakiness.
+3. **Ties:** The leaderboard sorts by `total_late_minutes: -1` and then `emp_code: 1`. This deterministic secondary key makes tied results stable, preventing test flakiness and pagination duplicates.
 
-4. **Headcount:** The department summary starts with `employees` and uses `$lookup` into `attendance_logs`. Preserving unmatched employees before grouping ensures people with zero logs remain in department headcount.
+4. **Headcount:** The department pipeline starts from `employees` and uses `$lookup` into `attendance_logs`. Preserving unmatched employees before grouping ensures employees with zero logs remain included in department totals.
 
-5. **100x data:** I would shard `attendance_logs` on a hashed compound key `(emp_code, date)` and move analytics to pre-computed daily rollups updated by MongoDB Change Streams, instead of aggregating raw collections on demand.
+5. **100x data:** I would shard `attendance_logs` on compound key `(emp_code, date)` and move heavy analytics to pre-aggregated daily rollups updated through MongoDB Change Streams.
