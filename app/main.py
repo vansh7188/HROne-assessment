@@ -13,6 +13,7 @@ from typing import Any, Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pymongo import ASCENDING, DESCENDING, MongoClient, ReturnDocument
 from pymongo.errors import DuplicateKeyError
@@ -233,6 +234,155 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Employee Attendance & Analytics API", version="2.0.0", lifespan=lifespan)
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+def dashboard() -> str:
+    return """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HROne Attendance Console</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script>
+    tailwind.config = {
+      theme: { extend: { colors: { ink: '#0b1220', panel: '#111a2e', cyanx: '#22d3ee' } } }
+    };
+  </script>
+</head>
+<body class="min-h-screen bg-slate-950 text-slate-100">
+  <div id="toast" class="fixed right-5 top-5 z-50 hidden max-w-sm rounded-xl border px-4 py-3 text-sm shadow-2xl"></div>
+  <main class="mx-auto max-w-7xl px-5 py-8 lg:px-8">
+    <header class="mb-8 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+      <div>
+        <p class="mb-2 text-xs font-semibold uppercase tracking-[0.3em] text-cyan-300">HROne / Operations</p>
+        <h1 class="text-3xl font-bold tracking-tight sm:text-4xl">Attendance command center</h1>
+        <p class="mt-2 text-slate-400">Live MongoDB-backed attendance, analytics, and audit visibility.</p>
+      </div>
+      <a href="/docs" class="inline-flex w-fit items-center rounded-lg border border-cyan-400/40 bg-cyan-400/10 px-4 py-2 text-sm font-semibold text-cyan-200 transition hover:bg-cyan-400/20">Open Swagger <span class="ml-2">↗</span></a>
+    </header>
+
+    <section class="mb-6 grid gap-4 md:grid-cols-3">
+      <article class="rounded-2xl border border-slate-800 bg-panel p-5 shadow-xl shadow-black/10">
+        <p class="text-sm text-slate-400">Live headcount</p><p id="headcount" class="mt-2 text-3xl font-bold">—</p>
+        <p class="mt-2 text-xs text-slate-500">Employees currently registered</p>
+      </article>
+      <article class="rounded-2xl border border-slate-800 bg-panel p-5 shadow-xl shadow-black/10">
+        <p class="text-sm text-slate-400">Today's punches</p><p id="punches" class="mt-2 text-3xl font-bold">—</p>
+        <p id="today-label" class="mt-2 text-xs text-slate-500"></p>
+      </article>
+      <article class="rounded-2xl border border-slate-800 bg-panel p-5 shadow-xl shadow-black/10">
+        <p class="text-sm text-slate-400">Late rate</p><p id="late-rate" class="mt-2 text-3xl font-bold text-amber-300">—</p>
+        <p class="mt-2 text-xs text-slate-500">Late records / today's punches</p>
+      </article>
+    </section>
+
+    <section class="mb-6 grid gap-6 lg:grid-cols-[0.8fr_1.2fr]">
+      <article class="rounded-2xl border border-slate-800 bg-panel p-6">
+        <div class="mb-5 flex items-center justify-between"><h2 class="text-lg font-semibold">Live punch simulator</h2><span class="rounded-full bg-emerald-400/10 px-3 py-1 text-xs text-emerald-300">API connected</span></div>
+        <form id="punch-form" class="space-y-4">
+          <label class="block text-sm text-slate-300">Employee code
+            <select id="emp-code" class="mt-2 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2.5 outline-none focus:border-cyan-400">
+              <option>EMP0001</option><option>EMP0002</option><option>EMP0003</option><option>EMP0004</option><option>EMP0005</option><option>EMP0006</option>
+            </select>
+          </label>
+          <div class="grid grid-cols-2 gap-3">
+            <button data-action="punch-in" type="button" class="rounded-lg bg-cyan-400 px-4 py-2.5 font-semibold text-slate-950 transition hover:bg-cyan-300">Punch in</button>
+            <button data-action="punch-out" type="button" class="rounded-lg bg-violet-400 px-4 py-2.5 font-semibold text-slate-950 transition hover:bg-violet-300">Punch out</button>
+          </div>
+        </form>
+        <div id="punch-result" class="mt-5 hidden rounded-xl border p-4 text-sm"></div>
+      </article>
+      <article class="rounded-2xl border border-slate-800 bg-panel p-6">
+        <div class="mb-4 flex items-center justify-between"><h2 class="text-lg font-semibold">Late leaderboard</h2><span id="month-label" class="text-xs text-slate-500"></span></div>
+        <div class="h-64"><canvas id="late-chart"></canvas></div>
+      </article>
+    </section>
+
+    <section class="mb-6 grid gap-6 lg:grid-cols-[1.15fr_0.85fr]">
+      <article class="rounded-2xl border border-slate-800 bg-panel p-6">
+        <h2 class="mb-4 text-lg font-semibold">Department attendance</h2>
+        <div class="overflow-x-auto"><table class="w-full text-left text-sm"><thead class="border-b border-slate-800 text-xs uppercase tracking-wider text-slate-500"><tr><th class="pb-3">Department</th><th class="pb-3">Active today</th><th class="pb-3">Headcount</th><th class="pb-3">Present days</th></tr></thead><tbody id="department-table"></tbody></table></div>
+      </article>
+      <article class="rounded-2xl border border-slate-800 bg-panel p-6">
+        <h2 class="mb-4 text-lg font-semibold">Audit trail viewer</h2>
+        <div class="flex gap-2"><input id="audit-emp" value="EMP0001" class="min-w-0 flex-1 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2.5 outline-none focus:border-cyan-400" placeholder="EMP0001"><input id="audit-date" type="date" class="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2.5 outline-none focus:border-cyan-400"><button id="audit-button" class="rounded-lg bg-slate-700 px-4 py-2.5 font-semibold hover:bg-slate-600">View</button></div>
+        <div id="audit-result" class="mt-5 text-sm text-slate-400">Select an employee and date to inspect a record.</div>
+      </article>
+    </section>
+    <footer class="flex items-center justify-between border-t border-slate-800 pt-5 text-xs text-slate-500"><span>FastAPI · PyMongo · UTC/IST safe</span><button id="refresh" class="hover:text-cyan-300">Refresh data ↻</button></footer>
+  </main>
+<script>
+const today = new Date();
+const pad = n => String(n).padStart(2, '0');
+const dateKey = `${today.getFullYear()}-${pad(today.getMonth()+1)}-${pad(today.getDate())}`;
+const monthKey = dateKey.slice(0, 7);
+document.getElementById('today-label').textContent = dateKey;
+document.getElementById('month-label').textContent = monthKey;
+document.getElementById('audit-date').value = dateKey;
+const json = async (url, options) => {
+  const response = await fetch(url, options);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(`${response.status}: ${data.detail || 'Request failed'}`);
+  return data;
+};
+const toast = (message, good = false) => {
+  const el = document.getElementById('toast');
+  el.textContent = message; el.className = `fixed right-5 top-5 z-50 max-w-sm rounded-xl border px-4 py-3 text-sm shadow-2xl ${good ? 'border-emerald-400/40 bg-emerald-400/10 text-emerald-200' : 'border-rose-400/40 bg-rose-400/10 text-rose-200'}`;
+  setTimeout(() => el.classList.add('hidden'), 4500);
+};
+let lateChart;
+async function loadDashboard() {
+  try {
+    const [employees, attendance, summary, leaderboard] = await Promise.all([
+      json('/employees?page=1&page_size=100'),
+      json(`/attendance?date_from=${dateKey}&date_to=${dateKey}&page=1&page_size=100`),
+      json(`/analytics/departments/summary?month=${monthKey}`),
+      json(`/analytics/leaderboard/late?month=${monthKey}&limit=10`)
+    ]);
+    document.getElementById('headcount').textContent = employees.total;
+    document.getElementById('punches').textContent = attendance.total;
+    const late = attendance.items.filter(item => (item.late_minutes || 0) > 0).length;
+    document.getElementById('late-rate').textContent = `${attendance.total ? ((late / attendance.total) * 100).toFixed(1) : '0.0'}%`;
+    const active = Object.fromEntries(attendance.items.map(item => [item.emp_code, item]));
+    document.getElementById('department-table').innerHTML = summary.items.map(item => {
+      const activeCount = Object.keys(active).filter(code => employees.items.find(e => e.emp_code === code && e.department === item.department)).length;
+      return `<tr class="border-b border-slate-800/70"><td class="py-3 font-medium">${item.department}</td><td class="py-3 text-cyan-300">${activeCount}</td><td class="py-3">${item.headcount}</td><td class="py-3">${item.present_days}</td></tr>`;
+    }).join('') || '<tr><td colspan="4" class="py-4 text-slate-500">No departments found.</td></tr>';
+    if (lateChart) lateChart.destroy();
+    lateChart = new Chart(document.getElementById('late-chart'), { type: 'bar', data: { labels: leaderboard.items.map(i => i.emp_code), datasets: [{ label: 'Late minutes', data: leaderboard.items.map(i => i.total_late_minutes), backgroundColor: '#22d3ee', borderRadius: 6 }] }, options: { maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#94a3b8' }, grid: { display: false } }, y: { beginAtZero: true, ticks: { color: '#94a3b8' }, grid: { color: '#1e293b' } } } } });
+  } catch (error) { toast(error.message); }
+}
+async function runPunch(action) {
+  const code = document.getElementById('emp-code').value;
+  const result = document.getElementById('punch-result');
+  try {
+    const data = await json(`/attendance/${action === 'punch-in' ? 'punch-in' : 'punch-out'}`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({emp_code: code}) });
+    result.className = 'mt-5 rounded-xl border border-emerald-400/30 bg-emerald-400/10 p-4 text-sm text-emerald-200';
+    result.innerHTML = `<strong>${action === 'punch-in' ? 'Punched in' : 'Punched out'} successfully</strong><br>${data.date} · ${data.status}${data.work_hours !== null ? ` · ${data.work_hours} work hours` : ''}`;
+    result.classList.remove('hidden'); toast('Attendance updated', true); loadDashboard();
+  } catch (error) { result.className = 'mt-5 rounded-xl border border-rose-400/30 bg-rose-400/10 p-4 text-sm text-rose-200'; result.textContent = error.message; result.classList.remove('hidden'); toast(error.message); }
+}
+async function loadAudit() {
+  const code = encodeURIComponent(document.getElementById('audit-emp').value.trim());
+  const date = document.getElementById('audit-date').value;
+  const target = document.getElementById('audit-result');
+  try {
+    const data = await json(`/attendance?emp_code=${code}&date_from=${date}&date_to=${date}&page=1&page_size=1`);
+    if (!data.items.length) { target.textContent = 'No attendance record found for this date.'; return; }
+    const record = data.items[0];
+    target.innerHTML = `<div class="mb-3 rounded-lg bg-slate-900 p-3"><div class="font-medium text-slate-200">${record.emp_code} · ${record.status}</div><div class="mt-1 text-xs text-slate-500">In: ${record.punch_in ? new Date(record.punch_in).toLocaleString() : '—'} · Out: ${record.punch_out ? new Date(record.punch_out).toLocaleString() : '—'}</div></div><div class="space-y-3">${record.history.length ? record.history.map(item => `<div class="border-l-2 border-cyan-400 pl-3"><div class="text-xs text-cyan-300">${new Date(item.at).toLocaleString()} · ${item.by}</div><div class="mt-1 text-xs text-slate-400">${item.reason}</div><pre class="mt-1 whitespace-pre-wrap text-xs text-slate-500">${JSON.stringify(item.changes, null, 2)}</pre></div>`).join('') : '<p class="text-slate-500">No manual corrections recorded.</p>'}</div>`;
+  } catch (error) { target.textContent = error.message; }
+}
+document.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', () => runPunch(button.dataset.action)));
+document.getElementById('audit-button').addEventListener('click', loadAudit);
+document.getElementById('refresh').addEventListener('click', loadDashboard);
+loadDashboard();
+</script>
+</body>
+</html>"""
 
 
 @app.get("/health")
