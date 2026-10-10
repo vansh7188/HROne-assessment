@@ -43,6 +43,13 @@ def _date(value: str) -> str:
     return value
 
 
+def validate_api_date(value: str) -> str:
+    try:
+        return _date(value)
+    except ValueError as exc:
+        raise HTTPException(422, "date must be YYYY-MM-DD") from exc
+
+
 def _time(value: str) -> str:
     if not TIME_RE.fullmatch(value):
         raise ValueError("time must be HH:MM")
@@ -469,9 +476,9 @@ def list_attendance(emp_code: Optional[str] = None, date_from: Optional[str] = N
                     date_to: Optional[str] = None, status: Optional[str] = None,
                     page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100)) -> dict[str, Any]:
     if date_from:
-        _date(date_from)
+        validate_api_date(date_from)
     if date_to:
-        _date(date_to)
+        validate_api_date(date_to)
     if date_from and date_to and date_from > date_to:
         raise HTTPException(422, "date_from must not be after date_to")
     query: dict[str, Any] = {}
@@ -491,7 +498,7 @@ def list_attendance(emp_code: Optional[str] = None, date_from: Optional[str] = N
 
 @app.patch("/attendance/{emp_code}/{record_date}")
 def regularize_attendance(emp_code: str, record_date: str, body: RegularizeIn) -> dict[str, Any]:
-    _date(record_date)
+    validate_api_date(record_date)
     employee = db.employees.find_one({"emp_code": emp_code})
     if employee is None:
         raise HTTPException(404, "employee not found")
@@ -643,17 +650,17 @@ def late_leaderboard(month: str, limit: int = Query(10, ge=1, le=50),
     pipeline += [{"$setWindowFields": {"sortBy": {"total_late_minutes": -1},
                                        "output": {"rank": {"$rank": {}}}}},
                  {"$match": {"rank": {"$lte": limit}}},
-                 {"$sort": {"total_late_minutes": -1, "_id": 1}},
                  {"$project": {"_id": 0, "rank": 1, "emp_code": "$_id", "name": "$employee.name",
-                               "department": "$employee.department", "total_late_minutes": 1, "late_count": 1}}]
+                               "department": "$employee.department", "total_late_minutes": 1, "late_count": 1}},
+                 {"$sort": {"total_late_minutes": -1, "emp_code": 1}}]
     return {"month": month, "items": list(db.attendance_logs.aggregate(pipeline))}
 
 
 @app.get("/analytics/departments/{department}/trend")
 def department_trend(department: str, from_: str = Query(..., alias="from"),
                      to: str = Query(..., alias="to")) -> dict[str, Any]:
-    _date(from_)
-    _date(to)
+    validate_api_date(from_)
+    validate_api_date(to)
     if to < from_:
         raise HTTPException(422, "to must not be before from")
     if (date.fromisoformat(to) - date.fromisoformat(from_)).days > 91:
